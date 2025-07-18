@@ -13,7 +13,7 @@ st.set_page_config(
 # App UI
 st.sidebar.header("QUOFFICE | The Office Quotes Machine")
 st.sidebar.info(
-    "Ever tried to drop a quote from The Office in a text but couldn't quite remember how it went? \n\n"
+    "Ever tried to drop a quote from The Office but couldn't quite remember how it went? \n\n"
     "Now, just start typing what you think the line is, and the **QUOFFICE** will track down the exact quote for you.\n\n"
     "To use it:\n"
     "- Start typing the line below, the table on top will find all matches\n\n"
