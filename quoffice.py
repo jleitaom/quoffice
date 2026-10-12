@@ -1,122 +1,140 @@
-import streamlit as st
-import pandas as pd
 import re
+
+import streamlit as st
+
+from core.data import load_quotes
+from core.search import get_conversation, search_quotes
+
+MAX_RESULTS = 50
+EXAMPLES = ["bears beats battlestar galactica", "i declare bankrupcy", "identity theft is not funny"]
 
 # Page setup
 st.set_page_config(
     page_title="QUOFFICE | The Office Quotes Machine",
     page_icon="🏢",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# App UI
-st.sidebar.header("QUOFFICE | The Office Quotes Machine")
-st.sidebar.info(
-    "Ever tried to drop a quote from The Office but couldn't quite remember how it went? \n\n"
-    "Now, just start typing what you think the line is, and the **QUOFFICE** will track down the exact quote for you.\n\n"
-    "To use it:\n"
-    "- Start typing the line below, the table on top will find all matches\n\n"
-    "- Once you find the line, choose it and the entire conversation will come up"
-)
-
-# Normalize function to clean text
-def normalize(text):
-    if not isinstance(text, str):
-        return ""
-    return re.sub(r"[^\w\s]", "", text.lower())
 
 # Load and cache data
 @st.cache_data
 def load_data():
-    df = pd.read_csv("./data/schrute.csv", sep=",")
-    df["normalized_text"] = df["text"].apply(normalize)
-    return df
+    return load_quotes()
+
 
 df = load_data()
 
-# Initialize session state
-for state in ["search_results", "quote_options", "quote_index_map"]:
-    st.session_state.setdefault(state, None)
 
-# Safe default for selected quote index
-row_index = None
-
-# Search form in sidebar
-with st.sidebar.form("search_form"):
-    search_input = st.text_input("Enter a keyword or phrase to search for quotes:")
-    submitted = st.form_submit_button("Search")
+@st.cache_data
+def find_quotes(query, seasons, characters):
+    pool = df
+    if seasons:
+        pool = pool[pool["season"].isin(seasons)]
+    if characters:
+        pool = pool[pool["character"].isin(characters)]
+    return search_quotes(pool, query)
 
 
-# Slider to control context range
-num_context = st.sidebar.slider(
-        "Context range",
-        min_value=1,
-        max_value=10,
-        value=3, 
+# Escape characters Streamlit markdown would interpret ("$1,200 ... $500" renders as LaTeX otherwise)
+def escape_markdown(text):
+    return re.sub(r"([\\$*_\[\]`#~<>])", r"\\\1", text)
+
+
+def quote_label(row):
+    prefix = "≈ " if row["match"] == "close" else ""
+    return f'{prefix}**{row["character"]}** · S{row["season"]}E{row["episode"]} - {escape_markdown(row["text"])}'
+
+
+def use_example(text):
+    st.session_state.query = text
+
+
+def clear_query():
+    st.session_state.query = ""
+
+
+# The search lives in the URL (?q=...) so results survive a refresh and can be shared
+if "query" not in st.session_state:
+    st.session_state.query = st.query_params.get("q", "")
+
+
+# Sidebar: filters and options
+with st.sidebar:
+    st.header("Filters")
+    seasons = st.multiselect("Season", sorted(df["season"].unique()), placeholder="All seasons")
+    characters = st.multiselect(
+        "Character", df["character"].value_counts().index, placeholder="Anyone"
+    )
+    num_context = st.slider("Lines of context", min_value=1, max_value=10, value=3)
+
+
+# Header and search box
+st.title("🏢 QUOFFICE")
+st.caption(
+    "Ever tried to drop a quote from The Office but couldn't quite remember how it went? "
+    "Type the line as you remember it - typos and wrong words are fine."
+)
+search_col, clear_col = st.columns([12, 1], gap="small", vertical_alignment="center")
+query = search_col.text_input(
+    "Search quotes",
+    key="query",
+    placeholder="e.g. bears beats battlestar galactica",
+    label_visibility="collapsed",
+)
+clear_col.button(
+    "✕", on_click=clear_query, disabled=not query, help="Clear search", use_container_width=True
+)
+
+if query:
+    st.query_params["q"] = query
+else:
+    st.query_params.clear()
+
+# Empty state: offer a few examples
+if not query.strip():
+    st.write("Not sure where to start? Try one of these:")
+    for col, example in zip(st.columns(len(EXAMPLES)), EXAMPLES):
+        col.button(example, on_click=use_example, args=(example,), use_container_width=True)
+    st.stop()
+
+results = find_quotes(query, tuple(seasons), tuple(characters))
+if results.empty:
+    st.warning("No quotes found. Try fewer words or remove a filter.")
+    st.stop()
+
+# Results summary
+num_exact = (results["match"] == "exact").sum()
+num_close = len(results) - num_exact
+summary = [f"{num_exact:,} exact" if num_exact else "No exact matches", f"{num_close} close (≈)" if num_close else ""]
+if len(results) > MAX_RESULTS:
+    summary.append(f"showing the first {MAX_RESULTS}, try a longer phrase to narrow it down")
+st.caption(" · ".join(part for part in summary if part))
+
+results_col, conversation_col = st.columns([2, 3], gap="large")
+
+# Results list
+with results_col:
+    shown = results.head(MAX_RESULTS)
+    # Radio values are row indices (always unique); labels are display-only
+    row_index = st.radio(
+        "Choose a quote to see the conversation",
+        options=shown.index,
+        format_func=lambda i: quote_label(shown.loc[i]),
     )
 
-# Search processing and results in main container
-with st.expander("**Quotes**", expanded=True):
-    if submitted and search_input:
-        normalized_input = normalize(search_input)
-        results = df[df["normalized_text"].str.contains(normalized_input, na=False)]
+# Conversation around the selected quote
+with conversation_col, st.container(border=True):
+    selected = df.loc[row_index]
+    st.subheader(selected["episode_name"])
+    st.caption(
+        f'Season {selected["season"]} · Episode {selected["episode"]} · '
+        f'⭐ {selected["imdb_rating"]} IMDb · Aired {selected["air_date"]}  \n'
+        f'Written by {selected["writer"].replace(";", ", ")} · Directed by {selected["director"].replace(";", ", ")}'
+    )
 
-        if results.empty:
-            st.warning("No quotes found.")
-            for key in ["search_results", "quote_options", "quote_index_map"]:
-                st.session_state[key] = None
-        else:
-            # Create radio options and index mapping
-            options = []
-            index_map = {}
-            for i, row in results.iterrows():
-                label = f'**{row["character"]} (S{row["season"]}E{row["episode"]})** - {row["text"]}'
-                options.append(label)
-                index_map[label] = i
-
-            st.session_state.search_results = results
-            st.session_state.quote_options = options
-            st.session_state.quote_index_map = index_map
-
-    if all([
-        st.session_state.search_results is not None,
-        st.session_state.quote_options,
-        st.session_state.quote_index_map
-    ]):
-        selected = st.radio("Choose a quote below to see the conversation", st.session_state.quote_options)
-        row_index = st.session_state.quote_index_map.get(selected)
-    
-    elif search_input == "":
-        st.warning("Please enter a keyword or phrase to search for quotes.")
-
-
-# Context quote display
-with st.container(border=True):
-
-    if row_index is not None:
-        full_df_index = df.index.get_loc(row_index)
-
-        start = max(0, full_df_index - num_context)
-        end = min(len(df), full_df_index + num_context + 1)
-
-        surrounding_quotes = df.iloc[start:end]
-
-        st.markdown(
-            f"""
-            **{df['episode_name'][row_index]}** |
-            **Season {df['season'][row_index]} Ep. {df['episode'][row_index]}** |
-            **IMDB Rating {df['imdb_rating'][row_index]}** |
-            **Air Date {df['air_date'][row_index]}** 
-            """
-        )
-
-        for i, row in surrounding_quotes.iterrows():
-            is_selected = row.name == row_index
-
-            text = f"***{row['text']}***" if is_selected else row['text']
-            character = f"***{row['character']}***" if is_selected else row['character']
-
-            st.markdown(
-                f'\n\n>{character}: {text}'
-            )
+    for i, line in get_conversation(df, row_index, num_context).iterrows():
+        text = escape_markdown(line["text"])
+        if i == row_index:
+            text = f"**:blue-background[{text}]**"
+        with st.chat_message(line["character"]):
+            st.markdown(f'**{escape_markdown(line["character"])}**  \n{text}')
